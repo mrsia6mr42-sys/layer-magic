@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="bn"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>লেয়ার স্প্লিটার</title>
+<style>
+:root{--bg:#f4f3ee;--fg:#1d1b2f;--card:#fff;--ac:#2b2bd9;--bd:#d6d3c8;--mu:#6b6880}
+@media(prefers-color-scheme:dark){:root{--bg:#14131f;--fg:#efeef7;--card:#201f2e;--ac:#8c8cff;--bd:#38364b;--mu:#a09db8}}
+*{box-sizing:border-box}
+body{margin:0 auto;max-width:720px;padding:14px;font:15px/1.5 "Noto Sans Bengali",system-ui,sans-serif;background:var(--bg);color:var(--fg)}
+h1{font-size:22px;margin:4px 0 2px}
+p.s{margin:0 0 12px;color:var(--mu)}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
+button,.b{background:var(--card);color:var(--fg);border:1px solid var(--bd);border-radius:8px;padding:10px 13px;font:inherit;cursor:pointer;display:inline-block}
+button.on,button.p,.b.p{background:var(--ac);border-color:var(--ac);color:#fff}
+@media(prefers-color-scheme:dark){button.on,button.p,.b.p{color:#14131f}}
+#stage{width:100%;height:auto;touch-action:none;border:1px solid var(--bd);border-radius:8px;background:repeating-conic-gradient(#c9c9c9 0 25%,#f2f2f2 0 50%) 0 0/16px 16px}
+#st{min-height:24px;color:var(--mu);margin:6px 0}
+.ly{display:flex;align-items:center;gap:8px;background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:6px 8px;margin:6px 0}
+.ly span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ly button{padding:6px 10px}
+.th{width:48px;height:48px;border-radius:4px;background:repeating-conic-gradient(#c9c9c9 0 25%,#f2f2f2 0 50%) 0 0/10px 10px}
+label.k{display:flex;gap:6px;align-items:center;color:var(--mu)}
+input[type=file]{display:none}
+</style></head>
+<body>
+<h1>লেয়ার স্প্লিটার</h1>
+<p class="s">ছবি থেকে অবজেক্ট ও লেখা আলাদা লেয়ারে ভাগ করুন। সব কাজ আপনার ফোনের ব্রাউজারেই হয়।</p>
+<label class="b p" for="file">ছবি বেছে নিন</label>
+<input id="file" type="file" accept="image/*">
+<div id="st">পেজ চালু ✓ — ছবি বেছে নিন</div>
+<div id="app" hidden>
+  <div class="row">
+    <button class="p" id="auto">Auto লেয়ার</button>
+    <button id="subj">শুধু মূল অবজেক্ট</button>
+    <button id="txt">লেখা আলাদা করুন</button>
+  </div>
+  <div class="row">
+    <button id="msel" class="on">Select: অবজেক্টে ট্যাপ</button>
+    <button id="mwd">Wand: AI ছাড়া</button>
+    <button id="mmov">Move: টেনে সরান</button>
+    <label class="k">সহনশীলতা <input type="range" id="tol" min="5" max="120" value="40"></label>
+    <label class="k"><input type="checkbox" id="fill" checked>পেছনের ফাঁকা অংশ ভরাট</label>
+  </div>
+  <canvas id="stage"></canvas>
+    <div id="ls"></div>
+  <div class="row">
+    <button class="p" id="zip">সব লেয়ার ZIP</button>
+    <button id="flat">একত্রে PNG</button>
+  </div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+<script type="module">
+let TF;const lib=async()=>TF||(TF=await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.2'));
+window.addEventListener('error',e=>say('ত্রুটি: '+e.message));
+window.addEventListener('unhandledrejection',e=>say('ত্রুটি: '+((e.reason&&e.reason.message)||e.reason)));
+const $=id=>document.getElementById(id),stage=$('stage'),ctx=stage.getContext('2d');
+const say=t=>$('st').textContent=t;
+const mk=(w,h)=>{const c=document.createElement('canvas');c.width=w;c.height=h;return c};
+let W,H,src,srcD,layers=[],mode='sel',busy=false,sam,proc,emb,inp,img,rm,rp,tn=0;
+
+$('file').onchange=async e=>{
+  const f=e.target.files[0];if(!f)return;
+  const im=await createImageBitmap(f),s=Math.min(1,1400/Math.max(im.width,im.height));
+  W=Math.round(im.width*s);H=Math.round(im.height*s);
+  src=mk(W,H);src.getContext('2d').drawImage(im,0,0,W,H);
+  srcD=src.getContext('2d').getImageData(0,0,W,H);
+  const b=mk(W,H);b.getContext('2d').drawImage(src,0,0);
+  layers=[{name:'Background',cv:b,x:0,y:0,vis:1}];
+  emb=null;img=null;tn=0;stage.width=W;stage.height=H;
+  $('app').hidden=false;draw();list();
+  say('ছবি লোড হয়েছে। Auto চাপুন, অথবা Select মোডে কোনো অবজেক্টে ট্যাপ করুন।');
+};
+
+function draw(){ctx.clearRect(0,0,W,H);for(const l of layers)if(l.vis)ctx.drawImage(l.cv,l.x,l.y)}
+function sw(a,b){if(b<0||b>=layers.length)return;[layers[a],layers[b]]=[layers[b],layers[a]]}
+function list(){
+  const box=$('ls');box.innerHTML='';
+  [...layers].reverse().forEach(l=>{
+    const i=layers.indexOf(l),r=document.createElement('div');r.className='ly';
+    const t=mk(48,48),k=Math.min(48/l.cv.width,48/l.cv.height);
+    t.getContext('2d').drawImage(l.cv,0,0,l.cv.width*k,l.cv.height*k);t.className='th';r.append(t);
+    const n=document.createElement('span');n.textContent=l.name;r.append(n);
+    [[l.vis?'👁':'🚫',()=>l.vis^=1],['↑',()=>sw(i,i+1)],['↓',()=>sw(i,i-1)],['🗑',()=>{if(i>0)layers.splice(i,1)}]].forEach(([s,f])=>{
+      const b=document.createElement('button');b.textContent=s;b.onclick=()=>{f();draw();list()};r.append(b)});
+    box.append(r);
+  });
+}
+
+// ---- layer from mask ----
+function dil(m,n){for(let k=0;k<n;k++){const o=m.slice();for(let y=1;y<H-1;y++)for(let x=1;x<W-1;x++){const i=y*W+x;if(!m[i]&&(m[i-1]||m[i+1]||m[i-W]||m[i+W]))o[i]=1}m=o}return m}
+function holeFill(mask){
+  const m0=dil(mask,3),bg=layers[0].cv,bc=bg.getContext('2d');
+  const s=Math.min(1,200/Math.max(W,H)),w=Math.round(W*s),h=Math.round(H*s),t=mk(w,h),tc=t.getContext('2d');
+  tc.drawImage(bg,0,0,w,h);
+  const d=tc.getImageData(0,0,w,h),p=d.data,m=new Uint8Array(w*h);let sr=0,sg=0,sb=0,n=0;
+  for(let y=0;y<h;y++)for(let x=0;x<w;x++){const i=y*w+x;m[i]=m0[Math.min(H-1,(y/s)|0)*W+Math.min(W-1,(x/s)|0)];if(!m[i]){sr+=p[i*4];sg+=p[i*4+1];sb+=p[i*4+2];n++}}
+  if(!n)return;
+  for(let i=0;i<w*h;i++)if(m[i]){p[i*4]=sr/n;p[i*4+1]=sg/n;p[i*4+2]=sb/n}
+  for(let it=0;it<400;it++)for(let y=1;y<h-1;y++)for(let x=1;x<w-1;x++){const i=y*w+x;if(m[i])for(let c=0;c<3;c++)p[i*4+c]=(p[(i-1)*4+c]+p[(i+1)*4+c]+p[(i-w)*4+c]+p[(i+w)*4+c])/4}
+  tc.putImageData(d,0,0);
+  const u=mk(W,H),uc=u.getContext('2d');uc.imageSmoothingQuality='high';uc.drawImage(t,0,0,W,H);
+  const ud=uc.getImageData(0,0,W,H),bd=bc.getImageData(0,0,W,H);
+  for(let i=0;i<W*H;i++)if(m0[i]){bd.data[i*4]=ud.data[i*4];bd.data[i*4+1]=ud.data[i*4+1];bd.data[i*4+2]=ud.data[i*4+2];bd.data[i*4+3]=255}
+  bc.putImageData(bd,0,0);
+}
+function addLayer(mm,name){
+  let x0=W,y0=H,x1=-1,y1=-1;
+  for(let y=0;y<H;y++)for(let x=0;x<W;x++)if(mm[y*W+x]){if(x<x0)x0=x;if(x>x1)x1=x;if(y<y0)y0=y;if(y>y1)y1=y}
+  if(x1<0){say('কিছু পাওয়া যায়নি');return}
+  const w=x1-x0+1,h=y1-y0+1,c=mk(w,h),cc=c.getContext('2d'),d=cc.createImageData(w,h);
+  for(let y=0;y<h;y++)for(let x=0;x<w;x++){const s=(y+y0)*W+x+x0;if(mm[s])d.data.set(srcD.data.subarray(s*4,s*4+4),(y*w+x)*4)}
+  cc.putImageData(d,0,0);
+  layers.push({name,cv:c,x:x0,y:y0,vis:1});
+  if($('fill').checked)holeFill(mm);
+}
+
+// ---- models ----
+async function getImg(){const {RawImage}=await lib();if(img)return img;const b=await new Promise(r=>src.toBlob(r,'image/png'));img=await RawImage.read(URL.createObjectURL(b));return img}
+async function tap(x,y){
+  if(busy)return;busy=true;
+  try{
+    const {SamModel,AutoProcessor,Tensor}=await lib();
+    if(!sam){say('SAM মডেল নামছে (প্রথমবার প্রায় ১০০MB, অপেক্ষা করুন)...');
+      const id='Xenova/slimsam-77-uniform';sam=await SamModel.from_pretrained(id);proc=await AutoProcessor.from_pretrained(id)}
+    if(!emb){say('ছবি বিশ্লেষণ হচ্ছে...');inp=await proc(await getImg());emb=await sam.get_image_embeddings(inp)}
+    say('অবজেক্ট কাটা হচ্ছে...');
+    const rs=inp.reshaped_input_sizes[0];
+    const pts=new Tensor('float32',[x/W*rs[1],y/H*rs[0]],[1,1,1,2]),lb=new Tensor('int64',[1n],[1,1,1]);
+    const out=await sam({...emb,input_points:pts,input_labels:lb});
+    const ms=await proc.post_process_masks(out.pred_masks,inp.original_sizes,inp.reshaped_input_sizes);
+    const sc=out.iou_scores.data;let b=0;for(let i=1;i<3;i++)if(sc[i]>sc[b])b=i;
+    const md=ms[0].data,mm=new Uint8Array(W*H);for(let i=0;i<W*H;i++)mm[i]=md[b*W*H+i]?1:0;
+    addLayer(mm,'Object '+layers.length);draw();list();say('লেয়ার যোগ হয়েছে ✓');
+  }catch(e){say('ত্রুটি: '+e.message)}
+  busy=false;
+}
+function wand(x,y){
+  x|=0;y|=0;const t=+$('tol').value,D=srcD.data,i0=(y*W+x)*4,R=D[i0],G=D[i0+1],B=D[i0+2];
+  const mm=new Uint8Array(W*H),st=[y*W+x];mm[y*W+x]=1;
+  while(st.length){const i=st.pop(),cx=i%W,cy=(i/W)|0;
+    for(const [dx,dy] of [[1,0],[-1,0],[0,1],[0,-1]]){const nx=cx+dx,ny=cy+dy;if(nx<0||ny<0||nx>=W||ny>=H)continue;const j=ny*W+nx;if(mm[j])continue;
+      const k=j*4;if(Math.abs(D[k]-R)+Math.abs(D[k+1]-G)+Math.abs(D[k+2]-B)<=t*3){mm[j]=1;st.push(j)}}}
+  addLayer(dil(mm,1),'Wand '+layers.length);draw();list();say('লেয়ার যোগ হয়েছে ✓');
+}
+async function subject(){
+  if(busy)return;busy=true;
+  try{
+    const {AutoModel,AutoProcessor,RawImage}=await lib();
+    if(!rm){say('Background remover মডেল নামছে (প্রথমবার)...');
+      rm=await AutoModel.from_pretrained('briaai/RMBG-1.4',{config:{model_type:'custom'}});
+      rp=await AutoProcessor.from_pretrained('briaai/RMBG-1.4',{config:{do_normalize:true,do_pad:false,do_rescale:true,do_resize:true,image_mean:[0.5,0.5,0.5],feature_extractor_type:'ImageFeatureExtractor',image_std:[1,1,1],resample:2,rescale_factor:0.00392156862745098,size:{width:1024,height:1024}}})}
+    say('মূল অবজেক্ট খোঁজা হচ্ছে...');
+    const {pixel_values}=await rp(await getImg()),{output}=await rm({input:pixel_values});
+    const m=await RawImage.fromTensor(output[0].mul(255).to('uint8')).resize(W,H);
+    addLayer(Uint8Array.from(m.data,v=>v>128?1:0),'Subject');draw();list();say('মূল অবজেক্ট আলাদা হয়েছে ✓');
+  }catch(e){say('ত্রুটি: '+e.message)}
+  busy=false;
+}
+function tl(l){
+  const f=`${l.size}px "Noto Sans Bengali",system-ui,sans-serif`,t=mk(1,1).getContext('2d');t.font=f;
+  const c=l.cv||mk(1,1);c.width=Math.ceil(t.measureText(l.text).width)+4;c.height=Math.ceil(l.size*1.4);
+  const k=c.getContext('2d');k.font=f;k.fillStyle=l.color;k.textBaseline='top';k.fillText(l.text,2,0);l.cv=c;
+}
+function cols(x0,y0,x1,y1){
+  const P=(x,y)=>{const i=(y*W+x)*4;return[srcD.data[i],srcD.data[i+1],srcD.data[i+2]]};
+  let a=[0,0,0],n=0;
+  const add=(x,y)=>{const p=P(x,y);a[0]+=p[0];a[1]+=p[1];a[2]+=p[2];n++};
+  for(let x=x0;x<=x1;x++){add(x,y0);add(x,y1)}for(let y=y0;y<=y1;y++){add(x0,y);add(x1,y)}
+  a=a.map(v=>v/n);let best=a,bd=-1;
+  for(let y=y0;y<=y1;y++)for(let x=x0;x<=x1;x++){const p=P(x,y),d=(p[0]-a[0])**2+(p[1]-a[1])**2+(p[2]-a[2])**2;if(d>bd){bd=d;best=p}}
+  return `rgb(${best.map(Math.round)})`;
+}
+async function ocr(){
+  if(busy)return;busy=true;
+  try{
+    say('লেখা খোঁজা হচ্ছে (ইংরেজি+বাংলা, প্রথমবার ডেটা নামবে)...');
+    const w=await Tesseract.createWorker('eng+ben'),{data}=await w.recognize(src);await w.terminate();
+    const hole=new Uint8Array(W*H);let c=0;
+    for(const L of data.lines){
+      const txt=L.text.trim();if(L.confidence<60||!txt)continue;
+      const x0=Math.max(0,L.bbox.x0),y0=Math.max(0,L.bbox.y0),x1=Math.min(W-1,L.bbox.x1),y1=Math.min(H-1,L.bbox.y1);
+      if(x1-x0<4||y1-y0<4)continue;
+      const l={name:'Text '+(++tn),text:txt,size:Math.round((y1-y0)*.85),color:cols(x0,y0,x1,y1),x:x0,y:y0,vis:1};
+      tl(l);layers.push(l);c++;
+      for(let y=Math.max(0,y0-2);y<=Math.min(H-1,y1+2);y++)for(let x=Math.max(0,x0-2);x<=Math.min(W-1,x1+2);x++)hole[y*W+x]=1;
+    }
+    if(c&&$('fill').checked)holeFill(hole);
+    draw();list();say(c?`${c}টি লেখা আলাদা হয়েছে। Move মোডে লেখায় ট্যাপ করলে এডিট করা যাবে ✓`:'কোনো লেখা পাওয়া যায়নি');
+  }catch(e){say('ত্রুটি: '+e.message)}
+  busy=false;
+}
+
+// ---- interaction ----
+let drag=null;
+const pos=e=>{const r=stage.getBoundingClientRect();return[(e.clientX-r.left)*W/r.width,(e.clientY-r.top)*H/r.height]};
+stage.onpointerdown=e=>{
+  const [x,y]=pos(e);
+  if(mode=='sel'){tap(x,y);return}
+  if(mode=='wd'){wand(x,y);return}
+  for(let i=layers.length-1;i>0;i--){
+    const l=layers[i];if(!l.vis)continue;
+    const px=Math.floor(x-l.x),py=Math.floor(y-l.y);
+    if(px<0||py<0||px>=l.cv.width||py>=l.cv.height)continue;
+    if(l.cv.getContext('2d').getImageData(px,py,1,1).data[3]>20){drag={l,x,y,ox:l.x,oy:l.y,moved:0};stage.setPointerCapture(e.pointerId);return}
+  }
+};
+stage.onpointermove=e=>{
+  if(!drag)return;const [x,y]=pos(e);
+  if(Math.abs(x-drag.x)+Math.abs(y-drag.y)>6)drag.moved=1;
+  if(drag.moved){drag.l.x=Math.round(drag.ox+x-drag.x);drag.l.y=Math.round(drag.oy+y-drag.y);draw()}
+};
+stage.onpointerup=()=>{
+  if(!drag)return;const d=drag;drag=null;
+  if(!d.moved&&d.l.text){const t=prompt('লেখা বদলান',d.l.text);if(t){d.l.text=t;tl(d.l);d.l.cv=d.l.cv;draw()}}
+  list();
+};
+const setMode=m=>{mode=m;$('msel').className=m=='sel'?'on':'';$('mmov').className=m=='mov'?'on':'';$('mwd').className=m=='wd'?'on':''};
+$('msel').onclick=()=>setMode('sel');$('mmov').onclick=()=>setMode('mov');$('mwd').onclick=()=>setMode('wd');
+$('subj').onclick=subject;$('txt').onclick=ocr;
+$('auto').onclick=async()=>{await subject();await ocr();setMode('mov')};
+
+// ---- export ----
+function dl(b,n){const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=n;a.click()}
+$('zip').onclick=async()=>{
+  say('ZIP তৈরি হচ্ছে...');const z=new JSZip();
+  for(const [i,l] of layers.entries()){
+    const c=mk(W,H);c.getContext('2d').drawImage(l.cv,l.x,l.y);
+    z.file(String(i).padStart(2,'0')+'_'+l.name.replace(/\W+/g,'_')+'.png',await new Promise(r=>c.toBlob(r)));
+  }
+  dl(await z.generateAsync({type:'blob'}),'layers.zip');say('ZIP ডাউনলোড হয়েছে ✓');
+};
+$('flat').onclick=()=>stage.toBlob(b=>dl(b,'merged.png'));
+</script>
+</body></html>
